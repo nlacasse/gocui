@@ -95,6 +95,11 @@ func (v *View) Cursor() (x, y int) {
 	return v.cx, v.cy
 }
 
+// NumberOfLines returns the Number of Lines of the view.
+func (v *View) NumberOfLines() (nol int) {
+	return len(v.lines)
+}
+
 // SetOrigin sets the origin position of the view's internal buffer,
 // so the buffer starts to be printed from this point, which means that
 // it is linked with the origin point of view. It can be used to
@@ -238,6 +243,21 @@ func (v *View) addLine(y int) error {
 	v.lines = append(v.lines, nil)
 	copy(v.lines[y+1:], v.lines[y:])
 	v.lines[y] = nil
+	return nil
+}
+
+// removeLine removes a line into the view's internal buffer at the position
+// corresponding to the point (x, y).
+func (v *View) RemoveLine(y int) error {
+	y = v.oy + y
+
+	if y < 0 || y >= len(v.lines) {
+		return errors.New("invalid point")
+	}
+	v.lines = v.lines[:y+copy(v.lines[y:], v.lines[y+1:])]
+	//v.lines = append(v.lines, nil)
+	//copy(v.lines[y+1:], v.lines[y:])
+	//v.lines[y] = nil
 	return nil
 }
 

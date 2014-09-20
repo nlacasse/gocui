@@ -8,19 +8,26 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"strings"
-
 	"github.com/nsf/termbox-go"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
 )
 
 // A View is a window. It maintains its own internal buffer and cursor
 // position.
 type View struct {
-	name                   string
-	x0, y0, x1, y1         int
-	ox, oy                 int
-	cx, cy                 int
-	lines                  [][]rune
+	name           string
+	x0, y0, x1, y1 int
+	ox, oy         int
+	cx, cy         int
+	lines          [][]rune
+	linesMutex     sync.Mutex
+
+	ParseASCIAttributes bool
+	fgAttributes        [][]Attribute
+
 	bgColor, fgColor       Attribute
 	selBgColor, selFgColor Attribute
 	overwrite              bool // overwrite in edit mode
@@ -73,8 +80,17 @@ func (v *View) setRune(x, y int, ch rune) error {
 		fgColor = v.fgColor
 		bgColor = v.bgColor
 	}
-	termbox.SetCell(v.x0+x+1, v.y0+y+1, ch,
-		termbox.Attribute(fgColor), termbox.Attribute(bgColor))
+
+	if !v.Highlight && v.fgAttributes != nil && len(v.fgAttributes) >= y+1 && v.fgAttributes[y] != nil && len(v.fgAttributes[y]) >= x+1 {
+		fgattr := v.fgAttributes[y][x]
+		termbox.SetCell(v.x0+x+1, v.y0+y+1, ch,
+			termbox.Attribute(fgattr), termbox.Attribute(bgColor))
+
+	} else {
+		termbox.SetCell(v.x0+x+1, v.y0+y+1, ch,
+			termbox.Attribute(fgColor), termbox.Attribute(bgColor))
+	}
+
 	return nil
 }
 
@@ -124,15 +140,77 @@ func (v *View) Origin() (x, y int) {
 // of functions like fmt.Fprintf, fmt.Fprintln, io.Copy, etc. Clear must
 // be called to clear the view's buffer.
 func (v *View) Write(p []byte) (n int, err error) {
+
+	v.linesMutex.Lock()
+	defer v.linesMutex.Unlock()
+
+	re := regexp.MustCompile(regexp.QuoteMeta("\033[") + "[0-9]{2}m")
+
 	r := bytes.NewReader(p)
 	s := bufio.NewScanner(r)
+	var currentForground Attribute
+	currentForground = v.fgColor
+
 	for s.Scan() {
-		line := bytes.Runes(s.Bytes())
-		v.lines = append(v.lines, line)
+		//runesLine := bytes.Runes(s.Bytes())
+		line := s.Text()
+		var parsedLine string = ""
+		var offset int = 0
+		positions := re.FindAllStringIndex(line, -1)
+		attributes := re.FindAllString(line, -1)
+		var AttributeLine []Attribute
+
+		for index, element := range positions {
+			start := offset
+			laenge := element[0] - start
+
+			if laenge > 0 {
+				parsedLine += line[start : start+laenge]
+			}
+			offset = element[1]
+
+			for i := 0; i < laenge; i++ {
+				AttributeLine = append(AttributeLine, currentForground)
+			}
+
+			attributString := attributes[index][2:4]
+			switch {
+			case attributString == "31":
+				currentForground = ColorRed
+			case attributString == "32":
+				currentForground = ColorGreen
+			case attributString == "33":
+				currentForground = ColorYellow
+			case attributString == "34":
+				currentForground = ColorBlue
+			case attributString == "35":
+				currentForground = ColorMagenta
+			case attributString == "36":
+				currentForground = ColorCyan
+			case attributString == "37":
+				currentForground = ColorWhite
+			}
+		}
+
+		if offset < len(line) {
+			start := offset
+			laenge := len(line) - start
+			for i := 0; i < laenge; i++ {
+				AttributeLine = append(AttributeLine, currentForground)
+			}
+			parsedLine += line[start : start+laenge]
+
+		}
+		runes := []rune(parsedLine)
+		//runesLine = append(nil, runes...)
+
+		v.lines = append(v.lines, runes)
+		v.fgAttributes = append(v.fgAttributes, AttributeLine)
 	}
 	if err := s.Err(); err != nil {
 		return 0, err
 	}
+
 	return len(p), nil
 }
 
@@ -163,8 +241,12 @@ func (v *View) draw() error {
 
 // Clear empties the view's internal buffer.
 func (v *View) Clear() {
+	v.linesMutex.Lock()
+	defer v.linesMutex.Unlock()
+
 	v.lines = nil
 	v.clearRunes()
+	v.fgAttributes = nil
 }
 
 // clearRunes erases all the cells in the view.
@@ -240,6 +322,7 @@ func (v *View) addLine(y int) error {
 	if y < 0 || y >= len(v.lines) {
 		return errors.New("invalid point")
 	}
+
 	v.lines = append(v.lines, nil)
 	copy(v.lines[y+1:], v.lines[y:])
 	v.lines[y] = nil
@@ -248,13 +331,21 @@ func (v *View) addLine(y int) error {
 
 // removeLine removes a line into the view's internal buffer at the position
 // corresponding to the point (x, y).
-func (v *View) RemoveLine(y int) error {
-	y = v.oy + y
+func (v *View) RemoveLine(y_org int) error {
+	y := v.oy + y_org
 
 	if y < 0 || y >= len(v.lines) {
 		return errors.New("invalid point")
 	}
+
+	v.linesMutex.Lock()
+	defer v.linesMutex.Unlock()
+
 	v.lines = v.lines[:y+copy(v.lines[y:], v.lines[y+1:])]
+
+	if v.fgAttributes != nil && len(v.fgAttributes) > y_org { //&& v.fgAttributes[y_org] != nil {
+		v.fgAttributes = v.fgAttributes[:y_org+copy(v.fgAttributes[y_org:], v.fgAttributes[y_org+1:])]
+	}
 	//v.lines = append(v.lines, nil)
 	//copy(v.lines[y+1:], v.lines[y:])
 	//v.lines[y] = nil
@@ -264,10 +355,10 @@ func (v *View) RemoveLine(y int) error {
 // Line returns a string with the line of the view's internal buffer
 // at the position corresponding to the point (x, y).
 func (v *View) Line(y int) (string, error) {
-	y = v.oy + y
+	y = (v.oy - 1) + y //v.oy (of by one ? )
 
 	if y < 0 || y >= len(v.lines) {
-		return "", errors.New("invalid point")
+		return "", errors.New("invalid point " + strconv.Itoa(y) + " maxvalue < " + strconv.Itoa(len(v.lines)))
 	}
 	return string(v.lines[y]), nil
 }

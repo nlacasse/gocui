@@ -154,7 +154,7 @@ func (v *View) Write(p []byte) (n int, err error) {
 	v.linesMutex.Lock()
 	defer v.linesMutex.Unlock()
 
-	re := regexp.MustCompile(regexp.QuoteMeta("\033[") + "[0-9]{2}m")
+	re := regexp.MustCompile(regexp.QuoteMeta("\033[") + "[0-9]+m")
 
 	r := bytes.NewReader(p)
 	s := bufio.NewScanner(r)
@@ -183,21 +183,23 @@ func (v *View) Write(p []byte) (n int, err error) {
 				AttributeLine = append(AttributeLine, currentForground)
 			}
 
-			attributString := attributes[index][2:4]
+			attributeString := attributes[index][2:]
 			switch {
-			case attributString == "31":
+			case attributeString == "0m":
+				currentForground = v.FgColor
+			case attributeString == "31m":
 				currentForground = ColorRed
-			case attributString == "32":
+			case attributeString == "32m":
 				currentForground = ColorGreen
-			case attributString == "33":
+			case attributeString == "33m":
 				currentForground = ColorYellow
-			case attributString == "34":
+			case attributeString == "34m":
 				currentForground = ColorBlue
-			case attributString == "35":
+			case attributeString == "35m":
 				currentForground = ColorMagenta
-			case attributString == "36":
+			case attributeString == "36m":
 				currentForground = ColorCyan
-			case attributString == "37":
+			case attributeString == "37m":
 				currentForground = ColorWhite
 			}
 		}

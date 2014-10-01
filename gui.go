@@ -6,8 +6,8 @@ package gocui
 
 import (
 	"errors"
-
 	"github.com/nsf/termbox-go"
+	"sync"
 )
 
 var (
@@ -27,6 +27,8 @@ type Gui struct {
 	layout      func(*Gui) error
 	keybindings []*keybinding
 	maxX, maxY  int
+
+	flushSync sync.Mutex
 
 	// BgColor and FgColor allow to configure the background and foreground
 	// colors of the GUI.
@@ -195,6 +197,7 @@ func (g *Gui) MainLoop() error {
 	}()
 
 	termbox.SetInputMode(termbox.InputAlt)
+	//termbox.SetInputMode(termbox.InputEsc)
 
 	if err := g.Flush(); err != nil {
 		return err
@@ -204,9 +207,9 @@ func (g *Gui) MainLoop() error {
 		if err := g.handleEvent(&ev); err != nil {
 			return err
 		}
-		if err := g.consumeevents(); err != nil {
-			return err
-		}
+		// if err := g.consumeevents(); err != nil {
+		// 	return err
+		// }
 		if err := g.Flush(); err != nil {
 			return err
 		}
@@ -246,6 +249,8 @@ func (g *Gui) Flush() error {
 	if g.layout == nil {
 		return errors.New("Null layout")
 	}
+	g.flushSync.Lock()
+	defer g.flushSync.Unlock()
 
 	termbox.Clear(termbox.Attribute(g.FgColor), termbox.Attribute(g.BgColor))
 	g.maxX, g.maxY = termbox.Size()

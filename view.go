@@ -1,4 +1,4 @@
-// Copyright 2014 The gocui Authors.  All rights reserved.
+// Copyright 2014 The gocui Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -25,9 +25,11 @@ type View struct {
 	ox, oy         int
 	cx, cy         int
 	lines          [][]rune
-	overwrite      bool // overwrite in edit mode
 	readOffset     int
 	readCache      string
+
+	tainted   bool       // marks if the viewBuffer must be updated
+	viewLines []viewLine // internal representation of the view's buffer
 
 	// BgColor and FgColor allow to configure the background and foreground
 	// colors of the View.
@@ -37,7 +39,7 @@ type View struct {
 	// foreground colors of the selected line, when it is highlighted.
 	SelBgColor, SelFgColor Attribute
 
-	linesMutex     sync.Mutex
+	linesMutex sync.Mutex
 
 	ParseASCIAttributes bool
 	fgAttributes        [][]Attribute
@@ -46,19 +48,41 @@ type View struct {
 	// buffer at the cursor position.
 	Editable bool
 
+	// Overwrite enables or disables the overwrite mode of the view.
+	Overwrite bool
+
 	// If Highlight is true, Sel{Bg,Fg}Colors will be used
 	// for the line under the cursor position.
 	Highlight bool
+
+	// If Frame is true, a border will be drawn around the view.
+	Frame bool
+
+	// If Wrap is true, the content that is written to this View is
+	// automatically wrapped when it is longer than its width. If true the
+	// view's x-origin will be ignored.
+	Wrap bool
+
+	// If Autoscroll is true, the View will automatically scroll down when the
+	// text overflows. If true the view's y-origin will be ignored.
+	Autoscroll bool
+}
+
+type viewLine struct {
+	linesX, linesY int // coordinates relative to v.lines
+	line           []rune
 }
 
 // newView returns a new View object.
 func newView(name string, x0, y0, x1, y1 int) *View {
 	v := &View{
-		name: name,
-		x0:   x0,
-		y0:   y0,
-		x1:   x1,
-		y1:   y1,
+		name:    name,
+		x0:      x0,
+		y0:      y0,
+		x1:      x1,
+		y1:      y1,
+		Frame:   true,
+		tainted: true,
 	}
 	return v
 }
@@ -150,9 +174,10 @@ func (v *View) Origin() (x, y int) {
 // of functions like fmt.Fprintf, fmt.Fprintln, io.Copy, etc. Clear must
 // be called to clear the view's buffer.
 func (v *View) Write(p []byte) (n int, err error) {
-
 	v.linesMutex.Lock()
 	defer v.linesMutex.Unlock()
+
+	v.tainted = true
 
 	re := regexp.MustCompile(regexp.QuoteMeta("\033[") + "[0-9]+m")
 
@@ -251,20 +276,64 @@ func (v *View) Rewind() {
 // draw re-draws the view's contents.
 func (v *View) draw() error {
 	maxX, maxY := v.Size()
+
+	if v.Wrap {
+		if maxX == 0 {
+			return errors.New("X size of the view cannot be 0")
+		}
+		v.ox = 0
+	}
+	if v.tainted {
+		v.viewLines = nil
+		for i, line := range v.lines {
+			if v.Wrap {
+				if len(line) <= maxX {
+					vline := viewLine{linesX: 0, linesY: i, line: line}
+					v.viewLines = append(v.viewLines, vline)
+					continue
+				} else {
+					vline := viewLine{linesX: 0, linesY: i, line: line[:maxX]}
+					v.viewLines = append(v.viewLines, vline)
+				}
+				// Append remaining lines
+				for n := maxX; n < len(line); n += maxX {
+					if len(line[n:]) <= maxX {
+						vline := viewLine{linesX: n, linesY: i, line: line[n:]}
+						v.viewLines = append(v.viewLines, vline)
+					} else {
+						vline := viewLine{linesX: n, linesY: i, line: line[n : n+maxX]}
+						v.viewLines = append(v.viewLines, vline)
+					}
+				}
+			} else {
+				vline := viewLine{linesX: 0, linesY: i, line: line}
+				v.viewLines = append(v.viewLines, vline)
+			}
+		}
+		v.tainted = false
+	}
+
+	if v.Autoscroll && len(v.viewLines) > maxY {
+		v.oy = len(v.viewLines) - maxY
+	}
 	y := 0
-	for i, line := range v.lines {
+	for i, vline := range v.viewLines {
 		if i < v.oy {
 			continue
 		}
+		if y >= maxY {
+			break
+		}
 		x := 0
-		for j, ch := range line {
+		for j, ch := range vline.line {
 			if j < v.ox {
 				continue
 			}
-			if x >= 0 && x < maxX && y >= 0 && y < maxY {
-				if err := v.setRune(x, y, ch); err != nil {
-					return err
-				}
+			if x >= maxX {
+				break
+			}
+			if err := v.setRune(x, y, ch); err != nil {
+				return err
 			}
 			x++
 		}
@@ -273,11 +342,39 @@ func (v *View) draw() error {
 	return nil
 }
 
+// realPosition returns the position in the internal buffer corresponding to the
+// point (x, y) of the view.
+func (v *View) realPosition(vx, vy int) (x, y int, err error) {
+	vx = v.ox + vx
+	vy = v.oy + vy
+
+	if vx < 0 || vy < 0 {
+		return 0, 0, errors.New("invalid point")
+	}
+
+	if len(v.viewLines) == 0 {
+		return vx, vy, nil
+	}
+
+	if vy < len(v.viewLines) {
+		vline := v.viewLines[vy]
+		x = vline.linesX + vx
+		y = vline.linesY
+	} else {
+		vline := v.viewLines[len(v.viewLines)-1]
+		x = vx
+		y = vline.linesY + vy - len(v.viewLines) + 1
+	}
+
+	return x, y, nil
+}
+
 // Clear empties the view's internal buffer.
 func (v *View) Clear() {
 	v.linesMutex.Lock()
 	defer v.linesMutex.Unlock()
 
+	v.tainted = true
 	v.lines = nil
 	v.clearRunes()
 	v.fgAttributes = nil
@@ -299,35 +396,30 @@ func (v *View) clearRunes() {
 // buffer is increased if the point is out of bounds. Overwrite mode is
 // governed by the value of View.overwrite.
 func (v *View) writeRune(x, y int, ch rune) error {
-	x = v.ox + x
-	y = v.oy + y
+	v.tainted = true
+
+	x, y, err := v.realPosition(x, y)
+	if err != nil {
+		return err
+	}
 
 	if x < 0 || y < 0 {
 		return errors.New("invalid point")
 	}
 
 	if y >= len(v.lines) {
-		if y >= cap(v.lines) {
-			s := make([][]rune, y+1, (y+1)*2)
-			copy(s, v.lines)
-			v.lines = s
-		} else {
-			v.lines = v.lines[:y+1]
-		}
+		s := make([][]rune, y-len(v.lines)+1)
+		v.lines = append(v.lines, s...)
 	}
-	if v.lines[y] == nil {
-		v.lines[y] = make([]rune, x+1, (x+1)*2)
-	} else if x >= len(v.lines[y]) {
-		if x >= cap(v.lines[y]) {
-			s := make([]rune, x+1, (x+1)*2)
-			copy(s, v.lines[y])
-			v.lines[y] = s
-		} else {
-			v.lines[y] = v.lines[y][:x+1]
-		}
+
+	olen := len(v.lines[y])
+	if x >= len(v.lines[y]) {
+		s := make([]rune, x-len(v.lines[y])+1)
+		v.lines[y] = append(v.lines[y], s...)
 	}
-	if !v.overwrite {
-		v.lines[y] = append(v.lines[y], ' ')
+
+	if !v.Overwrite && x < olen {
+		v.lines[y] = append(v.lines[y], '\x00')
 		copy(v.lines[y][x+1:], v.lines[y][x:])
 	}
 	v.lines[y][x] = ch
@@ -337,29 +429,73 @@ func (v *View) writeRune(x, y int, ch rune) error {
 // deleteRune removes a rune from the view's internal buffer, at the
 // position corresponding to the point (x, y).
 func (v *View) deleteRune(x, y int) error {
-	x = v.ox + x
-	y = v.oy + y
+	v.tainted = true
 
-	if x < 0 || y < 0 || y >= len(v.lines) || v.lines[y] == nil || x >= len(v.lines[y]) {
+	x, y, err := v.realPosition(x, y)
+	if err != nil {
+		return err
+	}
+
+	if x < 0 || y < 0 || y >= len(v.lines) || x >= len(v.lines[y]) {
 		return errors.New("invalid point")
 	}
-	copy(v.lines[y][x:], v.lines[y][x+1:])
-	v.lines[y][len(v.lines[y])-1] = ' '
+	v.lines[y] = append(v.lines[y][:x], v.lines[y][x+1:]...)
 	return nil
 }
 
-// addLine adds a line into the view's internal buffer at the position
-// corresponding to the point (x, y).
-func (v *View) addLine(y int) error {
-	y = v.oy + y
+// mergeLines merges the lines "y" and "y+1" if possible.
+func (v *View) mergeLines(y int) error {
+	v.tainted = true
+
+	_, y, err := v.realPosition(0, y)
+	if err != nil {
+		return err
+	}
 
 	if y < 0 || y >= len(v.lines) {
 		return errors.New("invalid point")
 	}
 
-	v.lines = append(v.lines, nil)
-	copy(v.lines[y+1:], v.lines[y:])
-	v.lines[y] = nil
+	if y < len(v.lines)-1 { // otherwise we don't need to merge anything
+		v.lines[y] = append(v.lines[y], v.lines[y+1]...)
+		v.lines = append(v.lines[:y+1], v.lines[y+2:]...)
+	}
+	return nil
+}
+
+// breakLine breaks a line of the internal buffer at the position corresponding
+// to the point (x, y).
+func (v *View) breakLine(x, y int) error {
+	v.linesMutex.Lock()
+	defer v.linesMutex.Unlock()
+
+	v.tainted = true
+
+	x, y, err := v.realPosition(x, y)
+	if err != nil {
+		return err
+	}
+
+	if y < 0 || y >= len(v.lines) {
+		return errors.New("invalid point")
+	}
+
+	var left, right []rune
+	if x < len(v.lines[y]) { // break line
+		left = make([]rune, len(v.lines[y][:x]))
+		copy(left, v.lines[y][:x])
+		right = make([]rune, len(v.lines[y][x:]))
+		copy(right, v.lines[y][x:])
+	} else { // new empty line
+		left = v.lines[y]
+	}
+
+	lines := make([][]rune, len(v.lines)+1)
+	lines[y] = left
+	lines[y+1] = right
+	copy(lines, v.lines[:y])
+	copy(lines[y+2:], v.lines[y+1:])
+	v.lines = lines
 	return nil
 }
 
@@ -376,14 +512,14 @@ func (v *View) Buffer() string {
 // removeLine removes a line into the view's internal buffer at the position
 // corresponding to the point (x, y).
 func (v *View) RemoveLine(y_org int) error {
+	v.linesMutex.Lock()
+	defer v.linesMutex.Unlock()
+
 	y := v.oy + y_org
 
 	if y < 0 || y >= len(v.lines) {
 		return errors.New("invalid point")
 	}
-
-	v.linesMutex.Lock()
-	defer v.linesMutex.Unlock()
 
 	v.lines = v.lines[:y+copy(v.lines[y:], v.lines[y+1:])]
 
@@ -399,7 +535,10 @@ func (v *View) RemoveLine(y_org int) error {
 // Line returns a string with the line of the view's internal buffer
 // at the position corresponding to the point (x, y).
 func (v *View) Line(y int) (string, error) {
-	y = (v.oy - 1) + y //v.oy (of by one ? )
+	_, y, err := v.realPosition(0, y)
+	if err != nil {
+		return "", err
+	}
 
 	if y < 0 || y >= len(v.lines) {
 		return "", errors.New("invalid point " + strconv.Itoa(y) + " maxvalue < " + strconv.Itoa(len(v.lines)))
@@ -410,10 +549,12 @@ func (v *View) Line(y int) (string, error) {
 // Word returns a string with the word of the view's internal buffer
 // at the position corresponding to the point (x, y).
 func (v *View) Word(x, y int) (string, error) {
-	x = v.ox + x
-	y = v.oy + y
+	x, y, err := v.realPosition(x, y)
+	if err != nil {
+		return "", err
+	}
 
-	if y < 0 || y >= len(v.lines) || x >= len(v.lines[y]) {
+	if x < 0 || y < 0 || y >= len(v.lines) || x >= len(v.lines[y]) {
 		return "", errors.New("invalid point")
 	}
 	l := string(v.lines[y])
@@ -433,7 +574,7 @@ func (v *View) Word(x, y int) (string, error) {
 }
 
 // indexFunc allows to split lines by words taking into account spaces
-// and 0
+// and 0.
 func indexFunc(r rune) bool {
 	return r == ' ' || r == 0
 }

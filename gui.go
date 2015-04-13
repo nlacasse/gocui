@@ -1,4 +1,4 @@
-// Copyright 2014 The gocui Authors.  All rights reserved.
+// Copyright 2014 The gocui Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -6,13 +6,14 @@ package gocui
 
 import (
 	"errors"
-	"github.com/nsf/termbox-go"
 	"sync"
+
+	"github.com/nsf/termbox-go"
 )
 
 var (
-	// ErrorQuit is used to decide if the MainLoop finished succesfully.
-	ErrorQuit error = errors.New("quit")
+	// Quit is used to decide if the MainLoop finished succesfully.
+	Quit error = errors.New("quit")
 
 	// ErrorUnkView allows to assert if a View must be initialized.
 	ErrorUnkView error = errors.New("unknown view")
@@ -28,7 +29,8 @@ type Gui struct {
 	keybindings []*keybinding
 	maxX, maxY  int
 
-	flushSync sync.Mutex
+	// Protects the gui from being flushed concurrently.
+	mu sync.Mutex
 
 	// BgColor and FgColor allow to configure the background and foreground
 	// colors of the GUI.
@@ -105,11 +107,12 @@ func (g *Gui) SetView(name string, x0, y0, x1, y1 int) (*View, error) {
 		return nil, errors.New("invalid name")
 	}
 
-	if v := g.View(name); v != nil {
+	if v, err := g.View(name); err == nil {
 		v.x0 = x0
 		v.y0 = y0
 		v.x1 = x1
 		v.y1 = y1
+		v.tainted = true
 		return v, nil
 	}
 
@@ -120,15 +123,26 @@ func (g *Gui) SetView(name string, x0, y0, x1, y1 int) (*View, error) {
 	return v, ErrorUnkView
 }
 
-// View returns a pointer to the view with the given name, or nil if
-// a view with that name does not exist.
-func (g *Gui) View(name string) *View {
+// View returns a pointer to the view with the given name, or error
+// ErrorUnkView if a view with that name does not exist.
+func (g *Gui) View(name string) (*View, error) {
 	for _, v := range g.views {
 		if v.name == name {
-			return v
+			return v, nil
 		}
 	}
-	return nil
+	return nil, ErrorUnkView
+}
+
+// Position returns the coordinates of the view with the given name,
+// or error ErrorUnkView if a view with that name does not exist.
+func (g *Gui) ViewPosition(name string) (x0, y0, x1, y1 int, err error) {
+	for _, v := range g.views {
+		if v.name == name {
+			return v.x0, v.y0, v.x1, v.y1, nil
+		}
+	}
+	return 0, 0, 0, 0, ErrorUnkView
 }
 
 // DeleteView deletes a view by name.
@@ -188,7 +202,7 @@ func (g *Gui) SetLayout(layout func(*Gui) error) {
 }
 
 // MainLoop runs the main loop until an error is returned. A successful
-// finish should return ErrorQuit.
+// finish should return Quit.
 func (g *Gui) MainLoop() error {
 	go func() {
 		for {
@@ -245,22 +259,40 @@ func (g *Gui) handleEvent(ev *termbox.Event) error {
 }
 
 // Flush updates the gui, re-drawing frames and buffers.
+//
+// Flush is safe for concurrent use by multiple goroutines. However it is
+// important to note that it will make the layout function to be called, which
+// could lead to a dead lock if the same mutex is used in both the function
+// calling Flush and the layout function.
 func (g *Gui) Flush() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	if g.layout == nil {
 		return errors.New("Null layout")
 	}
-	g.flushSync.Lock()
-	defer g.flushSync.Unlock()
 
 	termbox.Clear(termbox.Attribute(g.FgColor), termbox.Attribute(g.BgColor))
-	g.maxX, g.maxY = termbox.Size()
+
+	maxX, maxY := termbox.Size()
+	// if GUI's size has changed, we need to redraw all views
+	if maxX != g.maxX || maxY != g.maxY {
+		for _, v := range g.views {
+			v.tainted = true
+		}
+	}
+	g.maxX, g.maxY = maxX, maxY
+
 	if err := g.layout(g); err != nil {
 		return err
 	}
 	for _, v := range g.views {
-		if err := g.drawFrame(v); err != nil {
-			return err
+		if v.Frame {
+			if err := g.drawFrame(v); err != nil {
+				return err
+			}
 		}
+
 		if err := g.draw(v); err != nil {
 			return err
 		}
@@ -320,9 +352,7 @@ func (g *Gui) draw(v *View) error {
 			if v.cy >= maxY {
 				cy = maxY - 1
 			}
-			if err := v.SetCursor(cx, cy); err != nil {
-				return err
-			}
+			v.cx, v.cy = cx, cy
 			termbox.SetCursor(v.x0+v.cx+1, v.y0+v.cy+1)
 		}
 	} else {
@@ -426,35 +456,23 @@ func horizontalRune(ch rune) bool {
 // a key-press event satisfies a configured keybinding. Furthermore,
 // currentView's internal buffer is modified if currentView.Editable is true.
 func (g *Gui) onKey(ev *termbox.Event) error {
-	if g.currentView != nil && g.currentView.Editable {
-		if err := g.handleEdit(g.currentView, ev); err != nil {
-			return err
-		}
+	if g.currentView != nil && g.currentView.Editable && Edit != nil {
+		Edit(g.currentView, Key(ev.Key), ev.Ch, Modifier(ev.Mod))
+	}
+
+	var cv string
+	if g.currentView != nil {
+		cv = g.currentView.name
 	}
 	for _, kb := range g.keybindings {
-		if kb.h != nil && ev.Ch == kb.ch && Key(ev.Key) == kb.key && Modifier(ev.Mod) == kb.mod &&
-			(kb.viewName == "" || (g.currentView != nil && kb.viewName == g.currentView.name)) {
-			return kb.h(g, g.currentView)
+		if kb.h == nil {
+			continue
 		}
-	}
-	return nil
-}
-
-// handleEdit manages the edition mode.
-func (g *Gui) handleEdit(v *View, ev *termbox.Event) error {
-	switch {
-	case ev.Ch != 0 && ev.Mod == 0:
-		return v.editWrite(ev.Ch)
-	case ev.Key == termbox.KeySpace:
-		return v.editWrite(' ')
-	case ev.Key == termbox.KeyBackspace || ev.Key == termbox.KeyBackspace2:
-		return v.editDelete(true)
-	case ev.Key == termbox.KeyDelete:
-		return v.editDelete(false)
-	case ev.Key == termbox.KeyInsert:
-		v.overwrite = !v.overwrite
-	case ev.Key == termbox.KeyEnter:
-		return v.editLine()
+		if kb.matchKeypress(Key(ev.Key), ev.Ch, Modifier(ev.Mod)) && kb.matchView(cv) {
+			if err := kb.h(g, g.currentView); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

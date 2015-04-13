@@ -1,4 +1,4 @@
-// Copyright 2014 The gocui Authors.  All rights reserved.
+// Copyright 2014 The gocui Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -96,7 +96,8 @@ const (
 
 // Modifiers.
 const (
-	ModAlt Modifier = Modifier(termbox.ModAlt)
+	ModNone Modifier = Modifier(0)
+	ModAlt           = Modifier(termbox.ModAlt)
 )
 
 // Keybidings are used to link a given key-press event with an action.
@@ -118,4 +119,14 @@ func newKeybinding(viewname string, key Key, ch rune, mod Modifier, h Keybinding
 		h:        h,
 	}
 	return kb
+}
+
+// match returns if the keybinding matches the keypress
+func (kb *keybinding) matchKeypress(key Key, ch rune, mod Modifier) bool {
+	return kb.key == key && kb.ch == ch && kb.mod == mod
+}
+
+// match returns if the keybinding matches the current view
+func (kb *keybinding) matchView(viewname string) bool {
+	return kb.viewName == "" || kb.viewName == viewname
 }

@@ -1,3 +1,7 @@
+// Copyright 2014 The gocui Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 /*
 Package gocui allows to create console user interfaces.
 
@@ -14,7 +18,7 @@ Example:
 		return nil
 	}
 	func quit(g *gocui.Gui, v *gocui.View) error {
-		return gocui.ErrorQuit
+		return gocui.Quit
 	}
 	func main() {
 		var err error
@@ -24,11 +28,11 @@ Example:
 		}
 		defer g.Close()
 		g.SetLayout(layout)
-		if err := g.SetKeybinding("", gocui.KeyCtrlC, 0, quit); err != nil {
+		if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
 			log.Panicln(err)
 		}
 		err = g.MainLoop()
-		if err != nil && err != gocui.ErrorQuit {
+		if err != nil && err != gocui.Quit {
 			log.Panicln(err)
 		}
 	}

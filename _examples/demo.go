@@ -1,4 +1,4 @@
-// Copyright 2014 The gocui Authors.  All rights reserved.
+// Copyright 2014 The gocui Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -14,8 +14,7 @@ import (
 )
 
 func nextView(g *gocui.Gui, v *gocui.View) error {
-	currentView := g.CurrentView()
-	if currentView == nil || currentView.Name() == "side" {
+	if v == nil || v.Name() == "side" {
 		return g.SetCurrentView("main")
 	}
 	return g.SetCurrentView("side")
@@ -40,32 +39,6 @@ func cursorUp(g *gocui.Gui, v *gocui.View) error {
 		cx, cy := v.Cursor()
 		if err := v.SetCursor(cx, cy-1); err != nil && oy > 0 {
 			if err := v.SetOrigin(ox, oy-1); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func cursorLeft(g *gocui.Gui, v *gocui.View) error {
-	if v != nil {
-		ox, oy := v.Origin()
-		cx, cy := v.Cursor()
-		if err := v.SetCursor(cx-1, cy); err != nil && ox > 0 {
-			if err := v.SetOrigin(ox-1, oy); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func cursorRight(g *gocui.Gui, v *gocui.View) error {
-	if v != nil {
-		cx, cy := v.Cursor()
-		if err := v.SetCursor(cx+1, cy); err != nil {
-			ox, oy := v.Origin()
-			if err := v.SetOrigin(ox+1, oy); err != nil {
 				return err
 			}
 		}
@@ -106,39 +79,33 @@ func delMsg(g *gocui.Gui, v *gocui.View) error {
 }
 
 func quit(g *gocui.Gui, v *gocui.View) error {
-	return gocui.ErrorQuit
+	return gocui.Quit
 }
 
 func keybindings(g *gocui.Gui) error {
-	if err := g.SetKeybinding("side", gocui.KeyCtrlSpace, 0, nextView); err != nil {
+	if err := g.SetKeybinding("side", gocui.KeyCtrlSpace, gocui.ModNone, nextView); err != nil {
 		return err
 	}
-	if err := g.SetKeybinding("main", gocui.KeyCtrlSpace, 0, nextView); err != nil {
+	if err := g.SetKeybinding("main", gocui.KeyCtrlSpace, gocui.ModNone, nextView); err != nil {
 		return err
 	}
-	if err := g.SetKeybinding("", gocui.KeyArrowDown, 0, cursorDown); err != nil {
+	if err := g.SetKeybinding("side", gocui.KeyArrowDown, gocui.ModNone, cursorDown); err != nil {
 		return err
 	}
-	if err := g.SetKeybinding("", gocui.KeyArrowUp, 0, cursorUp); err != nil {
+	if err := g.SetKeybinding("side", gocui.KeyArrowUp, gocui.ModNone, cursorUp); err != nil {
 		return err
 	}
-	if err := g.SetKeybinding("", gocui.KeyArrowLeft, 0, cursorLeft); err != nil {
+	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
 		return err
 	}
-	if err := g.SetKeybinding("", gocui.KeyArrowRight, 0, cursorRight); err != nil {
+	if err := g.SetKeybinding("side", gocui.KeyEnter, gocui.ModNone, getLine); err != nil {
 		return err
 	}
-	if err := g.SetKeybinding("", gocui.KeyCtrlC, 0, quit); err != nil {
-		return err
-	}
-	if err := g.SetKeybinding("side", gocui.KeyEnter, 0, getLine); err != nil {
-		return err
-	}
-	if err := g.SetKeybinding("msg", gocui.KeyEnter, 0, delMsg); err != nil {
+	if err := g.SetKeybinding("msg", gocui.KeyEnter, gocui.ModNone, delMsg); err != nil {
 		return err
 	}
 
-	if err := g.SetKeybinding("main", gocui.KeyCtrlS, 0, saveMain); err != nil {
+	if err := g.SetKeybinding("main", gocui.KeyCtrlS, gocui.ModNone, saveMain); err != nil {
 		return err
 	}
 	return nil
@@ -180,7 +147,8 @@ func layout(g *gocui.Gui) error {
 		fmt.Fprintln(v, "Item 1")
 		fmt.Fprintln(v, "Item 2")
 		fmt.Fprintln(v, "Item 3")
-		fmt.Fprintln(v, "Item 4")
+		fmt.Fprint(v, "\rWill be")
+		fmt.Fprint(v, "deleted\rItem 4\nItem 5")
 	}
 	if v, err := g.SetView("main", 30, -1, maxX, maxY); err != nil {
 		if err != gocui.ErrorUnkView {
@@ -192,6 +160,7 @@ func layout(g *gocui.Gui) error {
 		}
 		fmt.Fprintf(v, "%s", b)
 		v.Editable = true
+		v.Wrap = true
 		if err := g.SetCurrentView("main"); err != nil {
 			return err
 		}
@@ -217,7 +186,7 @@ func main() {
 	g.ShowCursor = true
 
 	err = g.MainLoop()
-	if err != nil && err != gocui.ErrorQuit {
+	if err != nil && err != gocui.Quit {
 		log.Panicln(err)
 	}
 }
